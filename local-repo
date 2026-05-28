@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Portable script-dir resolution (no GNU readlink — works on macOS too).
+resolve_script_dir() {
+    local source="${BASH_SOURCE[0]}"
+    while [[ -L "$source" ]]; do
+        local dir
+        dir="$(cd -P "$(dirname "$source")" && pwd)"
+        source="$(readlink "$source")"
+        if [[ "$source" != /* ]]; then source="$dir/$source"; fi
+    done
+    cd -P "$(dirname "$source")" && pwd
+}
+SCRIPT_DIR="$(resolve_script_dir)"
+CONFIG_FILE="${SCRIPT_DIR}/local-repo.conf"
+
+NAS_USER=""
+NAS_HOST=""
+NAS_PORT=""
+NAS_REPOS_DIR="repos"
+
+SSH_BASE_OPTS=()
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+    fi
+    SSH_BASE_OPTS=()
+    if [[ -n "$NAS_PORT" ]]; then
+        SSH_BASE_OPTS=(-p "$NAS_PORT")
+    fi
+}
+
+write_config() {
+    cat > "$CONFIG_FILE" <<EOF
+# local-repo configuration — managed by 'local-repo config set <key> <value>'
+
+NAS_USER="${NAS_USER}"
+NAS_HOST="${NAS_HOST}"
+NAS_PORT="${NAS_PORT}"
+NAS_REPOS_DIR="${NAS_REPOS_DIR}"
+EOF
+    chmod 600 "$CONFIG_FILE"
+}
+
+require_remote_config() {
+    if [[ -z "$NAS_USER" || -z "$NAS_HOST" ]]; then
+        cat >&2 <<EOF
+error: SSH connection is not configured.
+
+Run:
+  local-repo config set user <username>
+  local-repo config set host <hostname-or-ip>
+
+See 'local-repo status' or 'local-repo config' for current settings.
+EOF
+        exit 2
+    fi
+}
+
+remote_url() {
+    local name="$1"
+    local remote_path="${NAS_REPOS_DIR}/${name}.git"
+    if [[ -n "$NAS_PORT" ]]; then
+        echo "ssh://${NAS_USER}@${NAS_HOST}:${NAS_PORT}/~/${remote_path}"
+    else
+        echo "${NAS_USER}@${NAS_HOST}:~/${remote_path}"
+    fi
+}
+
+usage() {
+    cat <<EOF
+Usage:
+  local-repo create <name>         create a bare repo on the remote
+  local-repo list                  list bare repos (alias: ls)
+  local-repo delete <name> [-f]    delete a repo (alias: rm; -f skips confirm)
+  local-repo url <name>            print the git remote URL for <name>
+  local-repo status                show SSH connection status and current config
+  local-repo config [...]          show or change SSH connection settings
+
+Config file: ${CONFIG_FILE}
+EOF
+}
+
+validate_name() {
+    if [[ ! "$1" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "error: repo name must contain only letters, digits, '.', '_', '-'" >&2
+        exit 2
+    fi
+}
+
+cmd_create() {
+    if [[ $# -ne 1 ]]; then
+        usage >&2
+        exit 2
+    fi
+
+    require_remote_config
+
+    local name="${1%.git}"
+    validate_name "$name"
+
+    local remote_path="${NAS_REPOS_DIR}/${name}.git"
+    local url
+    url="$(remote_url "$name")"
+
+    ssh "${SSH_BASE_OPTS[@]}" "${NAS_USER}@${NAS_HOST}" "
+        set -e
+        cd ~
+        if [ -e '${remote_path}' ]; then
+            echo \"error: ~/${remote_path} already exists on \$(hostname)\" >&2
+            exit 1
+        fi
+        mkdir -p '${NAS_REPOS_DIR}'
+        git init --bare '${remote_path}' >/dev/null
+        echo \"created ~/${remote_path} on \$(hostname)\"
+    "
+
+    echo
+    echo "remote URL: ${url}"
+    echo
+    echo "add to current repo with:"
+    echo "  git remote add origin ${url}"
+}
+
+cmd_list() {
+    if [[ $# -ne 0 ]]; then
+        usage >&2
+        exit 2
+    fi
+
+    require_remote_config
+
+    ssh "${SSH_BASE_OPTS[@]}" "${NAS_USER}@${NAS_HOST}" "
+        set -e
+        if [ ! -d ~/'${NAS_REPOS_DIR}' ]; then
+            echo 'no ~/${NAS_REPOS_DIR} directory on \$(hostname)' >&2
+            exit 0
+        fi
+        cd ~/'${NAS_REPOS_DIR}'
+        shopt -s nullglob
+        found=0
+        for d in *.git; do
+            [ -d \"\$d\" ] || continue
+            found=1
+            size=\$(du -sh \"\$d\" 2>/dev/null | cut -f1)
+            printf '%-8s  %s\n' \"\$size\" \"\${d%.git}\"
+        done
+        if [ \$found -eq 0 ]; then
+            echo '(no repos)'
+        fi
+    "
+}
+
+cmd_delete() {
+    local force=0
+    local name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--force) force=1; shift ;;
+            -*) echo "error: unknown flag '$1'" >&2; exit 2 ;;
+            *)
+                if [[ -n "$name" ]]; then
+                    echo "error: too many arguments" >&2
+                    exit 2
+                fi
+                name="$1"; shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$name" ]]; then
+        usage >&2
+        exit 2
+    fi
+
+    require_remote_config
+
+    name="${name%.git}"
+    validate_name "$name"
+
+    local remote_path="${NAS_REPOS_DIR}/${name}.git"
+
+    if [[ $force -ne 1 ]]; then
+        printf "delete ~/%s on %s@%s? [y/N] " "$remote_path" "$NAS_USER" "$NAS_HOST"
+        read -r answer
+        case "$answer" in
+            y|Y|yes|YES) ;;
+            *) echo "aborted"; exit 1 ;;
+        esac
+    fi
+
+    ssh "${SSH_BASE_OPTS[@]}" "${NAS_USER}@${NAS_HOST}" "
+        set -e
+        cd ~
+        if [ ! -d '${remote_path}' ]; then
+            echo \"error: ~/${remote_path} does not exist on \$(hostname)\" >&2
+            exit 1
+        fi
+        rm -rf '${remote_path}'
+        echo \"deleted ~/${remote_path} on \$(hostname)\"
+    "
+}
+
+cmd_url() {
+    if [[ $# -ne 1 ]]; then
+        echo "usage: local-repo url <name>" >&2
+        exit 2
+    fi
+
+    require_remote_config
+
+    local name="${1%.git}"
+    validate_name "$name"
+    remote_url "$name"
+}
+
+cmd_status() {
+    if [[ $# -ne 0 ]]; then
+        echo "usage: local-repo status" >&2
+        exit 2
+    fi
+
+    echo "config file: ${CONFIG_FILE}"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "             (not present — run 'local-repo config set ...' to create)"
+    fi
+    echo
+    echo "  user      = ${NAS_USER:-(unset)}"
+    echo "  host      = ${NAS_HOST:-(unset)}"
+    echo "  port      = ${NAS_PORT:-(default, 22)}"
+    echo "  repos-dir = ~/${NAS_REPOS_DIR}"
+    echo
+
+    if [[ -z "$NAS_USER" || -z "$NAS_HOST" ]]; then
+        echo "connection: not configured"
+        exit 1
+    fi
+
+    local remote="${NAS_USER}@${NAS_HOST}"
+    if [[ -n "$NAS_PORT" ]]; then
+        printf 'connection: testing %s on port %s ... ' "$remote" "$NAS_PORT"
+    else
+        printf 'connection: testing %s ... ' "$remote"
+    fi
+
+    if ssh "${SSH_BASE_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$remote" 'true' 2>/dev/null; then
+        echo "ok"
+    else
+        echo "FAILED"
+        echo "  (check network, SSH key, hostname/port; try: ssh ${SSH_BASE_OPTS[*]:-} ${remote})"
+        exit 1
+    fi
+
+    printf 'repos dir:  ~/%s ... ' "$NAS_REPOS_DIR"
+    local result
+    if result=$(ssh "${SSH_BASE_OPTS[@]}" -o BatchMode=yes "$remote" "
+        set -e
+        if [ ! -d ~/'${NAS_REPOS_DIR}' ]; then
+            echo MISSING
+            exit 0
+        fi
+        cd ~/'${NAS_REPOS_DIR}'
+        shopt -s nullglob
+        n=0
+        for d in *.git; do
+            [ -d \"\$d\" ] && n=\$((n+1))
+        done
+        echo \"OK \$n\"
+    " 2>/dev/null); then
+        case "$result" in
+            MISSING)
+                echo "missing (will be created on first 'local-repo create')"
+                ;;
+            OK\ *)
+                echo "ok (${result#OK } repos)"
+                ;;
+            *)
+                echo "unexpected response: ${result}"
+                ;;
+        esac
+    else
+        echo "could not check"
+    fi
+}
+
+config_usage() {
+    cat <<EOF
+Usage:
+  local-repo config                   show current settings
+  local-repo config set <key> <val>   set a value and save to ${CONFIG_FILE}
+  local-repo config unset <key>       clear a value
+  local-repo config path              print path to config file
+
+Keys: user, host, port, repos-dir
+EOF
+}
+
+cmd_config() {
+    if [[ $# -eq 0 ]]; then
+        echo "config file: ${CONFIG_FILE}"
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "             (not present — run 'local-repo config set ...' to create)"
+        fi
+        echo
+        echo "  user      = ${NAS_USER:-(unset)}"
+        echo "  host      = ${NAS_HOST:-(unset)}"
+        echo "  port      = ${NAS_PORT:-(default, 22)}"
+        echo "  repos-dir = ${NAS_REPOS_DIR}"
+        return 0
+    fi
+
+    local sub="$1"; shift
+
+    case "$sub" in
+        set)
+            if [[ $# -ne 2 ]]; then
+                config_usage >&2
+                exit 2
+            fi
+            local key="$1" value="$2"
+            case "$key" in
+                user)      NAS_USER="$value" ;;
+                host)      NAS_HOST="$value" ;;
+                port)
+                    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+                        echo "error: port must be a positive integer" >&2
+                        exit 2
+                    fi
+                    NAS_PORT="$value"
+                    ;;
+                repos-dir) NAS_REPOS_DIR="$value" ;;
+                *)
+                    echo "error: unknown key '$key' (expected: user, host, port, repos-dir)" >&2
+                    exit 2
+                    ;;
+            esac
+            write_config
+            echo "set ${key} = ${value}"
+            ;;
+        unset)
+            if [[ $# -ne 1 ]]; then
+                config_usage >&2
+                exit 2
+            fi
+            local key="$1"
+            case "$key" in
+                user)      NAS_USER="" ;;
+                host)      NAS_HOST="" ;;
+                port)      NAS_PORT="" ;;
+                repos-dir) NAS_REPOS_DIR="repos" ;;
+                *)
+                    echo "error: unknown key '$key' (expected: user, host, port, repos-dir)" >&2
+                    exit 2
+                    ;;
+            esac
+            write_config
+            echo "unset ${key}"
+            ;;
+        path)
+            echo "$CONFIG_FILE"
+            ;;
+        -h|--help|help)
+            config_usage
+            ;;
+        *)
+            echo "error: unknown config subcommand '$sub'" >&2
+            config_usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+main() {
+    load_config
+
+    if [[ $# -lt 1 ]]; then
+        usage >&2
+        exit 2
+    fi
+
+    local subcmd="$1"
+    shift
+
+    case "$subcmd" in
+        create)         cmd_create "$@" ;;
+        list|ls)        cmd_list "$@" ;;
+        delete|rm)      cmd_delete "$@" ;;
+        url)            cmd_url "$@" ;;
+        status)         cmd_status "$@" ;;
+        config)         cmd_config "$@" ;;
+        -h|--help|help) usage ;;
+        *)
+            echo "error: unknown subcommand '$subcmd'" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"

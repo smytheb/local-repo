@@ -1,0 +1,12 @@
+# local-repo configuration
+#
+# Copy this file to local-repo.conf and edit, or use:
+#   local-repo config set user <username>
+#   local-repo config set host <hostname-or-ip>
+#   local-repo config set port <port>         # optional, default 22
+#   local-repo config set repos-dir <dir>     # optional, default "repos"
+
+NAS_USER="your-username"
+NAS_HOST="your-server-or-ip"
+NAS_PORT=""
+NAS_REPOS_DIR="repos"
