@@ -106,7 +106,7 @@ cmd_create() {
     local url
     url="$(remote_url "$name")"
 
-    ssh "${SSH_BASE_OPTS[@]}" "${NAS_USER}@${NAS_HOST}" "
+    ssh ${SSH_BASE_OPTS[@]+"${SSH_BASE_OPTS[@]}"} "${NAS_USER}@${NAS_HOST}" "
         set -e
         cd ~
         if [ -e '${remote_path}' ]; then
@@ -133,7 +133,7 @@ cmd_list() {
 
     require_remote_config
 
-    ssh "${SSH_BASE_OPTS[@]}" "${NAS_USER}@${NAS_HOST}" "
+    ssh ${SSH_BASE_OPTS[@]+"${SSH_BASE_OPTS[@]}"} "${NAS_USER}@${NAS_HOST}" "
         set -e
         if [ ! -d ~/'${NAS_REPOS_DIR}' ]; then
             echo 'no ~/${NAS_REPOS_DIR} directory on \$(hostname)' >&2
@@ -193,7 +193,7 @@ cmd_delete() {
         esac
     fi
 
-    ssh "${SSH_BASE_OPTS[@]}" "${NAS_USER}@${NAS_HOST}" "
+    ssh ${SSH_BASE_OPTS[@]+"${SSH_BASE_OPTS[@]}"} "${NAS_USER}@${NAS_HOST}" "
         set -e
         cd ~
         if [ ! -d '${remote_path}' ]; then
@@ -247,7 +247,7 @@ cmd_status() {
         printf 'connection: testing %s ... ' "$remote"
     fi
 
-    if ssh "${SSH_BASE_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$remote" 'true' 2>/dev/null; then
+    if ssh ${SSH_BASE_OPTS[@]+"${SSH_BASE_OPTS[@]}"} -o BatchMode=yes -o ConnectTimeout=5 "$remote" 'true' 2>/dev/null; then
         echo "ok"
     else
         echo "FAILED"
@@ -257,7 +257,7 @@ cmd_status() {
 
     printf 'repos dir:  ~/%s ... ' "$NAS_REPOS_DIR"
     local result
-    if result=$(ssh "${SSH_BASE_OPTS[@]}" -o BatchMode=yes "$remote" "
+    if result=$(ssh ${SSH_BASE_OPTS[@]+"${SSH_BASE_OPTS[@]}"} -o BatchMode=yes "$remote" "
         set -e
         if [ ! -d ~/'${NAS_REPOS_DIR}' ]; then
             echo MISSING

@@ -9,4 +9,4 @@
 NAS_USER="your-username"
 NAS_HOST="your-server-or-ip"
 NAS_PORT=""
-NAS_REPOS_DIR="repos"
+NAS_REPOS_DIR="~/repos"
