@@ -67,8 +67,79 @@ local-repo status
 
 ## Usage
 
+There are two main workflows, with everything else available as individual
+tools you can use if you want.
+
+### Start a new project (`local-repo init`)
+
+From an empty directory you want to turn into a project:
+
 ```
-local-repo create <name>         # create bare repo at ~/<repos-dir>/<name>.git
+cd ~/projects/my-new-thing
+local-repo init
+```
+
+This prompts for the repo name (defaulting to the current directory's name),
+creates the bare repo on the server, runs `git init` in the current
+directory, and sets `origin` to the server URL. From there:
+
+```
+git add .
+git commit -m "initial commit"
+git push -u origin main
+```
+
+### Back up an existing repo (`local-repo set-backup`)
+
+From inside a repo that already has its own `origin` (e.g. GitHub) and you
+want a self-hosted backup:
+
+```
+cd ~/projects/existing-thing
+local-repo set-backup
+```
+
+This creates `<repo-name>-backup.git` on the server (the `-backup` suffix
+keeps it from colliding with any existing `<repo-name>.git` you may already
+be using as an origin), adds a `backup` remote to the local repo, and pushes
+all branches and tags.
+
+To refresh the backup later:
+
+```
+git push backup --all && git push backup --tags
+```
+
+`set-backup` is re-runnable — if the bare repo or the local `backup` remote
+already exists, it reuses them.
+
+#### Mirror on push (`--mirror`)
+
+If you want every `git push` to also send to the backup automatically — useful
+when your `origin` is GitHub (or similar) and you just want a self-hosted
+mirror of whatever you push:
+
+```
+local-repo set-backup --mirror
+```
+
+This adds the backup URL to `origin`'s push URLs (preserving the existing
+one), so a plain `git push` now pushes to both your real origin and the NAS
+backup in one go. No hooks, no wrapper — just git config. Verify with:
+
+```
+git remote -v
+```
+
+You'll see two `(push)` lines for `origin`. The caveat is that only pushes to
+`origin` get mirrored — `git push <other-remote>` won't trigger the backup,
+so you can fall back to `git push backup --all && git push backup --tags`
+if you ever need to refresh it manually.
+
+### Other commands
+
+```
+local-repo create <name>         # create just a bare repo on the server (no local init)
 local-repo list                  # list bare repos with disk sizes  (alias: ls)
 local-repo delete <name> [-f]    # delete a repo (prompts unless -f) (alias: rm)
 local-repo url <name>            # print the git remote URL for <name>

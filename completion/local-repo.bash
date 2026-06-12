@@ -11,7 +11,7 @@ _local_repo() {
     local words=("${COMP_WORDS[@]}")
     local cword="${COMP_CWORD}"
 
-    local subcommands="create list ls delete rm url status config help"
+    local subcommands="init set-backup create list ls delete rm url status config help"
     local config_subs="set unset path"
     local config_keys="user host port repos-dir"
 
@@ -44,6 +44,12 @@ _local_repo() {
             if [[ "$cur" == -* ]]; then
                 # shellcheck disable=SC2207
                 COMPREPLY=( $(compgen -W "-f --force" -- "$cur") )
+            fi
+            ;;
+        set-backup)
+            if [[ "$cur" == -* ]]; then
+                # shellcheck disable=SC2207
+                COMPREPLY=( $(compgen -W "--mirror" -- "$cur") )
             fi
             ;;
     esac

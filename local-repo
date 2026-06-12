@@ -73,7 +73,22 @@ remote_url() {
 usage() {
     cat <<EOF
 Usage:
-  local-repo create <name>         create a bare repo on the remote
+
+Main workflows:
+  local-repo init                  start a new project here: prompts for a name,
+                                   creates the bare repo on the server, runs
+                                   'git init' in the current directory, and
+                                   sets origin to the server URL
+  local-repo set-backup [--mirror] back up the repo in the current directory:
+                                   creates <repo-name>-backup.git on the server,
+                                   adds a 'backup' remote here, and pushes all
+                                   branches/tags. with --mirror, also wires the
+                                   backup URL into origin's push URLs so that
+                                   'git push' mirrors to it automatically.
+                                   re-run to refresh.
+
+Other commands:
+  local-repo create <name>         create a bare repo on the remote (no local init)
   local-repo list                  list bare repos (alias: ls)
   local-repo delete <name> [-f]    delete a repo (alias: rm; -f skips confirm)
   local-repo url <name>            print the git remote URL for <name>
@@ -89,6 +104,177 @@ validate_name() {
         echo "error: repo name must contain only letters, digits, '.', '_', '-'" >&2
         exit 2
     fi
+}
+
+cmd_init() {
+    if [[ $# -ne 0 ]]; then
+        echo "usage: local-repo init" >&2
+        exit 2
+    fi
+
+    require_remote_config
+
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "error: already inside a git repo" >&2
+        echo "       use 'local-repo set-backup' to back up an existing repo," >&2
+        echo "       or 'local-repo create <name>' to make just the remote bare repo." >&2
+        exit 1
+    fi
+
+    local default_name name
+    default_name="$(basename "$PWD")"
+    printf "repo name [%s]: " "$default_name"
+    read -r name
+    if [[ -z "$name" ]]; then
+        name="$default_name"
+    fi
+    name="${name%.git}"
+    validate_name "$name"
+
+    local remote_path="${NAS_REPOS_DIR}/${name}.git"
+    local url
+    url="$(remote_url "$name")"
+
+    ssh ${SSH_BASE_OPTS[@]+"${SSH_BASE_OPTS[@]}"} "${NAS_USER}@${NAS_HOST}" "
+        set -e
+        cd ~
+        if [ -e '${remote_path}' ]; then
+            echo \"error: ~/${remote_path} already exists on \$(hostname)\" >&2
+            exit 1
+        fi
+        mkdir -p '${NAS_REPOS_DIR}'
+        git init --bare '${remote_path}' >/dev/null
+        echo \"created ~/${remote_path} on \$(hostname)\"
+    "
+
+    git init
+    git remote add origin "$url"
+
+    echo
+    echo "origin set to: ${url}"
+    echo
+    echo "next steps:"
+    echo "  git add ."
+    echo "  git commit -m 'initial commit'"
+    echo "  git push -u origin main"
+}
+
+configure_mirror_push() {
+    local backup_url="$1"
+
+    if ! git remote get-url origin >/dev/null 2>&1; then
+        echo
+        echo "error: --mirror needs an existing 'origin' remote to mirror from." >&2
+        echo "       it's intended for repos whose origin is somewhere else" >&2
+        echo "       (e.g. GitHub) that you also want backed up to the server." >&2
+        exit 1
+    fi
+
+    local origin_fetch
+    origin_fetch="$(git remote get-url origin)"
+
+    # `git config --get-all` exits 1 when the key is unset; `|| true` keeps
+    # set -e happy and leaves the var empty in that case.
+    local existing_pushurls
+    existing_pushurls="$(git config --get-all remote.origin.pushurl 2>/dev/null || true)"
+
+    if [[ -z "$existing_pushurls" ]]; then
+        # No explicit pushurls yet: a `git push origin` currently goes to the
+        # fetch URL implicitly. Adding any explicit pushurl turns that off, so
+        # preserve the existing destination by adding the fetch URL first.
+        git remote set-url --add --push origin "$origin_fetch"
+        git remote set-url --add --push origin "$backup_url"
+        echo
+        echo "mirror configured: 'git push origin' now pushes to both:"
+        echo "  ${origin_fetch}"
+        echo "  ${backup_url}"
+        return
+    fi
+
+    if grep -Fxq -- "$backup_url" <<<"$existing_pushurls"; then
+        echo
+        echo "mirror already configured (origin push URLs already include backup)"
+        return
+    fi
+
+    git remote set-url --add --push origin "$backup_url"
+    echo
+    echo "mirror configured: appended backup to origin's push URLs:"
+    while IFS= read -r u; do echo "  ${u}"; done <<<"$existing_pushurls"
+    echo "  ${backup_url}"
+}
+
+cmd_set_backup() {
+    local mirror=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mirror) mirror=1; shift ;;
+            -*) echo "error: unknown flag '$1'" >&2; exit 2 ;;
+            *)  echo "error: unexpected argument '$1'" >&2; exit 2 ;;
+        esac
+    done
+
+    require_remote_config
+
+    local toplevel
+    if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+        echo "error: not inside a git repo" >&2
+        echo "       run this from inside the repo you want to back up." >&2
+        exit 1
+    fi
+
+    local name
+    name="$(basename "$toplevel")"
+    validate_name "$name"
+
+    local backup_name="${name}-backup"
+    local remote_path="${NAS_REPOS_DIR}/${backup_name}.git"
+    local url
+    url="$(remote_url "$backup_name")"
+
+    ssh ${SSH_BASE_OPTS[@]+"${SSH_BASE_OPTS[@]}"} "${NAS_USER}@${NAS_HOST}" "
+        set -e
+        cd ~
+        mkdir -p '${NAS_REPOS_DIR}'
+        if [ -d '${remote_path}' ]; then
+            echo \"reusing existing ~/${remote_path} on \$(hostname)\"
+        else
+            git init --bare '${remote_path}' >/dev/null
+            echo \"created ~/${remote_path} on \$(hostname)\"
+        fi
+    "
+
+    if git remote get-url backup >/dev/null 2>&1; then
+        local existing
+        existing="$(git remote get-url backup)"
+        if [[ "$existing" != "$url" ]]; then
+            echo "error: local remote 'backup' already exists with a different URL:" >&2
+            echo "         ${existing}" >&2
+            echo "       remove it first with: git remote remove backup" >&2
+            exit 1
+        fi
+        echo "local remote 'backup' already points at ${url}"
+    else
+        git remote add backup "$url"
+        echo "added local remote 'backup' → ${url}"
+    fi
+
+    echo
+    echo "pushing all branches and tags..."
+    git push backup --all
+    git push backup --tags
+
+    if [[ $mirror -eq 1 ]]; then
+        configure_mirror_push "$url"
+    fi
+
+    echo
+    if [[ $mirror -eq 1 ]]; then
+        echo "to refresh manually (the mirror does this automatically on 'git push'):"
+    else
+        echo "to refresh the backup later:"
+    fi
+    echo "  git push backup --all && git push backup --tags"
 }
 
 cmd_create() {
@@ -386,6 +572,8 @@ main() {
     shift
 
     case "$subcmd" in
+        init)           cmd_init "$@" ;;
+        set-backup)     cmd_set_backup "$@" ;;
         create)         cmd_create "$@" ;;
         list|ls)        cmd_list "$@" ;;
         delete|rm)      cmd_delete "$@" ;;
