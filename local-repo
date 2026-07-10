@@ -31,6 +31,8 @@ load_config() {
     if [[ -n "$NAS_PORT" ]]; then
         SSH_BASE_OPTS=(-p "$NAS_PORT")
     fi
+    # Also catch a hand-edited config, not just one written by 'config set'.
+    validate_repos_dir "$NAS_REPOS_DIR"
 }
 
 write_config() {
@@ -104,6 +106,33 @@ validate_name() {
         echo "error: repo name must contain only letters, digits, '.', '_', '-'" >&2
         exit 2
     fi
+}
+
+# The config file is sourced as bash and write_config emits values inside double
+# quotes, so these characters would corrupt it on the next load.
+validate_conf_value() {
+    case "$2" in
+        *[\"\$\`\\]*)
+            printf 'error: %s must not contain a quote, $, backtick or backslash\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# NAS_REPOS_DIR is interpolated into remote command strings as '${NAS_REPOS_DIR}',
+# so an apostrophe would close that quote and run as remote shell code.
+validate_repos_dir() {
+    validate_conf_value repos-dir "$1"
+    case "$1" in
+        *\'*)
+            echo "error: repos-dir must not contain an apostrophe" >&2
+            exit 2
+            ;;
+        "")
+            echo "error: repos-dir must not be empty" >&2
+            exit 2
+            ;;
+    esac
 }
 
 cmd_init() {
@@ -508,6 +537,7 @@ cmd_config() {
                 exit 2
             fi
             local key="$1" value="$2"
+            validate_conf_value "$key" "$value"
             case "$key" in
                 user)      NAS_USER="$value" ;;
                 host)      NAS_HOST="$value" ;;
@@ -518,7 +548,10 @@ cmd_config() {
                     fi
                     NAS_PORT="$value"
                     ;;
-                repos-dir) NAS_REPOS_DIR="$value" ;;
+                repos-dir)
+                    validate_repos_dir "$value"
+                    NAS_REPOS_DIR="$value"
+                    ;;
                 *)
                     echo "error: unknown key '$key' (expected: user, host, port, repos-dir)" >&2
                     exit 2
