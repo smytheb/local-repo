@@ -13,7 +13,34 @@ resolve_script_dir() {
     cd -P "$(dirname "$source")" && pwd
 }
 SCRIPT_DIR="$(resolve_script_dir)"
-CONFIG_FILE="${SCRIPT_DIR}/local-repo.conf"
+
+# Config-file resolution. Historically the config lived next to the script,
+# which is ideal for a clone+symlink install. But when the script is installed
+# into a read-only prefix (e.g. the Nix store), that directory can't be written,
+# so we fall back to the XDG location. Resolution order:
+#   1. $LOCAL_REPO_CONF, if set — explicit override (used by the Nix package).
+#   2. an existing conf next to the script — keeps legacy / macOS installs working.
+#   3. an existing conf under $XDG_CONFIG_HOME (default ~/.config).
+#   4. neither exists yet: write next to the script if that dir is writable
+#      (legacy behaviour), otherwise under $XDG_CONFIG_HOME.
+resolve_config_file() {
+    if [[ -n "${LOCAL_REPO_CONF:-}" ]]; then
+        printf '%s\n' "$LOCAL_REPO_CONF"
+        return
+    fi
+    local legacy="${SCRIPT_DIR}/local-repo.conf"
+    local xdg="${XDG_CONFIG_HOME:-$HOME/.config}/local-repo/local-repo.conf"
+    if [[ -f "$legacy" ]]; then
+        printf '%s\n' "$legacy"
+    elif [[ -f "$xdg" ]]; then
+        printf '%s\n' "$xdg"
+    elif [[ -w "$SCRIPT_DIR" ]]; then
+        printf '%s\n' "$legacy"
+    else
+        printf '%s\n' "$xdg"
+    fi
+}
+CONFIG_FILE="$(resolve_config_file)"
 
 NAS_USER=""
 NAS_HOST=""
@@ -36,6 +63,7 @@ load_config() {
 }
 
 write_config() {
+    mkdir -p "$(dirname "$CONFIG_FILE")"
     cat > "$CONFIG_FILE" <<EOF
 # local-repo configuration — managed by 'local-repo config set <key> <value>'
 
