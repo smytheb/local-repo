@@ -3,20 +3,9 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-
-    # The tool's source lives one level up — this flake sits in the nix/ subdir.
-    # A flake in a subdirectory can't read parent files with a `../` path literal
-    # (pure evaluation forbids escaping the flake root), so we pull the repo in as
-    # a non-flake relative-path input and read the files we need from it. When this
-    # flake is consumed via `git+file://…?dir=nix`, this resolves to the same
-    # git-fetched tree (so .gitignore is honoured and local-repo.conf is excluded).
-    src = {
-      url = "path:..";
-      flake = false;
-    };
   };
 
-  outputs = { self, nixpkgs, src }:
+  outputs = { self, nixpkgs }:
     let
       # Unix-y systems only: the tool is bash + git + ssh.
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
@@ -29,7 +18,9 @@
           pname = "local-repo";
           version = "0.1.0";
 
-          inherit src;
+          # Flake root == repo root now, so a plain path literal is legal and the
+          # personal local-repo.conf is excluded by .gitignore on git-fetched builds.
+          src = ./.;
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
@@ -37,8 +28,8 @@
           dontConfigure = true;
           dontBuild = true;
 
-          # Copy only the tracked files we ship — never the personal .conf, even
-          # if a local `path:..` fetch happened to include it.
+          # Install only the files we ship. On git-fetched builds the source is
+          # tracked-files-only, so the personal .conf never enters the store.
           installPhase = ''
             runHook preInstall
 
@@ -82,7 +73,7 @@
         default = local-repo;
       });
 
-      # `nix run .#local-repo` / `nix run github:you/local-repo?dir=nix`
+      # `nix run .#local-repo` / `nix run github:smytheb/local-repo`
       apps = forAllSystems (pkgs: rec {
         local-repo = {
           type = "app";
